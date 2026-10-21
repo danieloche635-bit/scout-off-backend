@@ -15,7 +15,7 @@ import config from '../config';
 import { correlationMemoFromContext, recordTxCorrelation } from './txCorrelation';
 import { getRequestSignal } from '../utils/requestContext';
 
-import { stellarBreaker } from '../utils/circuitBreaker';
+import { RetryingCircuitBreaker } from '../utils/circuitBreaker';
 import { getPlayerById } from '../db';
 
 const tracer = trace.getTracer('scout-off-backend');
@@ -32,6 +32,16 @@ if ((rawServer as { httpClient?: { defaults?: { timeout?: number } } }).httpClie
     config.stellarRpcTimeoutMs;
 }
 
+/**
+ * Stellar RPC breaker (#1564). Thresholds come from the validated config so an
+ * invalid CIRCUIT_BREAKER_* value fails at startup instead of silently
+ * disabling the breaker.
+ */
+export const stellarBreaker = new RetryingCircuitBreaker({
+  failureThreshold: config.circuitBreaker.default.failureThreshold,
+  resetTimeoutMs: config.circuitBreaker.default.resetTimeoutMs,
+});
+
 const server = new Proxy(rawServer, {
   get(target, prop, receiver) {
     const value = Reflect.get(target, prop, receiver);
@@ -42,7 +52,7 @@ const server = new Proxy(rawServer, {
   }
 });
 
-export { server, stellarBreaker };
+export { server };
 
 export function networkPassphrase(): string {
   return config.networkPassphrase;

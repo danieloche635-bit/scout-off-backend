@@ -23,10 +23,16 @@
 export type CircuitState = 'closed' | 'open' | 'half-open';
 
 export interface CircuitBreakerOptions {
-  /** Number of consecutive failures before opening. Default: 5 */
-  failureThreshold?: number;
-  /** Milliseconds to wait before moving from open → half-open. Default: 30000 */
-  resetTimeoutMs?: number;
+  /**
+   * Number of consecutive failures before opening. Required: callers pass the
+   * validated value from `config.circuitBreaker.*` (#1564).
+   */
+  failureThreshold: number;
+  /**
+   * Milliseconds to wait before moving from open → half-open. Required, for
+   * the same reason — this module reads no environment variables.
+   */
+  resetTimeoutMs: number;
   /** Human-readable name used in error messages and logs. */
   name?: string;
 }
@@ -47,14 +53,10 @@ export class CircuitBreaker {
   private readonly resetTimeoutMs: number;
   readonly name: string;
 
-  constructor(options: CircuitBreakerOptions = {}) {
+  constructor(options: CircuitBreakerOptions) {
     this.name = options.name ?? 'unknown';
-    this.failureThreshold =
-      options.failureThreshold ??
-      parseInt(process.env.CIRCUIT_BREAKER_FAILURE_THRESHOLD ?? '5', 10);
-    this.resetTimeoutMs =
-      options.resetTimeoutMs ??
-      parseInt(process.env.CIRCUIT_BREAKER_RESET_TIMEOUT_MS ?? '30000', 10);
+    this.failureThreshold = options.failureThreshold;
+    this.resetTimeoutMs = options.resetTimeoutMs;
   }
 
   getState(): CircuitState {
@@ -209,4 +211,5 @@ export class RetryingCircuitBreaker {
   }
 }
 
-export const stellarBreaker = new RetryingCircuitBreaker();
+// The Stellar breaker instance itself lives in `src/services/stellarCore.ts`,
+// where it is constructed with `config.circuitBreaker.default` (#1564).

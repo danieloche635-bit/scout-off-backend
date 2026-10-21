@@ -23,7 +23,8 @@ Start every investigation with the health and metrics endpoints:
 behind the chain tip after the last poll. It is exposed as
 `indexer_ledger_lag` on `/metrics` and a warning is logged when it exceeds
 `INDEXER_LAG_WARN_THRESHOLD` (default `100`). Small, transient lag is normal
-(polls run every 5 s, and `INDEXER_FINALITY_MARGIN` — default `10` ledgers —
+(polls run every `INDEXER_POLL_INTERVAL_MS`, default 5 s, and
+`INDEXER_FINALITY_MARGIN` — default `10` ledgers —
 intentionally treats the tip as non-final); persistent three-figure lag is not.
 
 ## Incident → action
@@ -283,6 +284,37 @@ The backend maintains circuit breakers to fail fast when downstream dependencies
 | `IPFS_BREAKER_RESET_TIMEOUT_MS` | `30000` (30 s) | ms | Cooldown duration before IPFS breaker tests Pinata recovery |
 
 When open, calls fail immediately with `CircuitBreakerOpenError` rather than consuming sockets while waiting on network timeouts. See [docs/degradation-contracts.md](degradation-contracts.md#circuit-breakers) for degradation contracts and behavior under failure.
+
+All four values are parsed and validated once in `src/config.ts` (under
+`config.circuitBreaker.default` and `config.circuitBreaker.ipfs`) and passed
+into the breaker constructors (#1564). An invalid value — a threshold below 1
+or a reset timeout below 1000 ms — aborts startup with a clear error instead of
+silently disabling the breaker. The utilities themselves read no environment
+variables.
+
+## Indexer poll interval (#1568)
+
+The contract-event indexer polls Soroban RPC on a schedule driven by
+`INDEXER_POLL_INTERVAL_MS`. The default (5000 ms) matches Stellar's ledger
+close time: polling faster than that usually returns the same ledger again and
+only spends RPC quota.
+
+| Variable | Default | Range | Effect |
+| -------- | ------- | ----- | ------ |
+| `INDEXER_POLL_INTERVAL_MS` | `5000` | `1000`–`300000` ms | How often the indexer asks RPC for new ledgers |
+
+Guidance:
+
+- **Testnet / staging:** raise it (e.g. `15000`–`30000`) to cut RPC usage and
+  cost; a few extra seconds of indexing lag is harmless there.
+- **Production:** leave it at `5000`. Larger values increase `indexer_ledger_lag`
+  and the delay before events reach webhooks/SSE clients.
+- **Local sandbox / tests:** a smaller value speeds up end-to-end feedback, but
+  never below `1000`, which the config rejects at startup.
+
+This interval is separate from `INDEXER_BACKFILL_FROM_LEDGER` (replay start
+ledger) and from the reindex batching knobs (`REINDEX_*`), which control how
+much work each poll performs rather than how often it runs.
 
 ## Graceful shutdown (#1315)
 

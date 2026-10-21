@@ -29,11 +29,20 @@ function scanFile(filePath) {
   }
 }
 
-fs.readdirSync(dbDir).forEach(file => {
-  if (file.endsWith('.ts')) {
-    scanFile(path.join(dbDir, file));
-  }
-});
+// Walk recursively: query helpers live both in src/db/*.ts and in the domain
+// repository modules under src/db/repositories/ (#1535).
+function scanDir(dir) {
+  fs.readdirSync(dir, { withFileTypes: true }).forEach((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      scanDir(full);
+    } else if (entry.name.endsWith('.ts')) {
+      scanFile(full);
+    }
+  });
+}
+
+scanDir(dbDir);
 
 if (found) {
   process.exit(1);

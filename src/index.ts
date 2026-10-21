@@ -119,7 +119,10 @@ async function startServer() {
     };
   }
 
-  // Poll for new contract events every 5 seconds
+  // Poll for new contract events. The interval is configurable because 5s
+  // (roughly Stellar's ledger close time) is not right for every environment:
+  // staging/testnet may want a slower poll to save RPC quota, sandboxes faster
+  // (#1568). Validated in config (1000–300000 ms).
   const poll = withJobTracking(async () => {
     try {
       await indexEvents();
@@ -129,7 +132,8 @@ async function startServer() {
   });
 
   poll();
-  const pollInterval = setInterval(poll, 5_000);
+  logger.info(`Indexer poll interval: ${config.indexerPollIntervalMs}ms`);
+  const pollInterval = setInterval(poll, config.indexerPollIntervalMs);
 
   // Poll for IPFS retries every 30 seconds
   const retryPins = withJobTracking(async () => {
