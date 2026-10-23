@@ -614,7 +614,7 @@ function processCursorResults(
   rows: (PlayerRow | ScoredPlayerRow)[],
   limit: number,
   sortBy: string,
-  sortOrder: string,
+  _sortOrder: string,
 ): SearchPlayersResult {
   const hasMore = rows.length > limit;
   const data = hasMore ? rows.slice(0, limit) : rows;

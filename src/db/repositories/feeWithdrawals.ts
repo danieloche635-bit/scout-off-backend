@@ -4,8 +4,7 @@
  *
  * Driver status: fully on `getDriver()` (async) — works on both SQLite and PostgreSQL.
  */
-import { timedQueryAsync } from '../query';
-import { getDriver } from '../query';
+import { timedQueryAsync, getDriver } from '../query';
 
 export interface FeeWithdrawalRow {
   id: number;

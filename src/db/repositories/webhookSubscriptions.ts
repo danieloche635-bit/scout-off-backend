@@ -26,6 +26,8 @@ export interface WebhookSubscription {
   scout_wallet: string | null;
   event_types: string | null; // JSON array of ContractEventType strings, or null = all
   created_at: string;
+  previous_secret?: string | null;
+  previous_secret_expires_at?: string | null;
 }
 
 export function createWebhookSubscription(
@@ -33,6 +35,8 @@ export function createWebhookSubscription(
   secret?: string,
   scoutWallet?: string,
   eventTypes?: string[],
+  previousSecret?: string,
+  previousSecretExpiresAt?: string,
 ): WebhookSubscription {
   const finalSecret = secret ?? crypto.randomBytes(32).toString('hex');
   // Encrypted at rest (#686) — only the ciphertext is ever persisted. The
@@ -40,7 +44,12 @@ export function createWebhookSubscription(
   // issuance time) but is never written back to storage.
   const encryptedSecret = encryptWebhookSecret(finalSecret);
   const eventTypesJson = eventTypes && eventTypes.length > 0 ? JSON.stringify(eventTypes) : null;
-  const sql = 'INSERT INTO webhook_subscriptions (url, secret, scout_wallet, event_types) VALUES (?, ?, ?, ?)';
+  const encryptedPreviousSecret = previousSecret
+    ? encryptWebhookSecret(previousSecret)
+    : null;
+  const sql = `INSERT INTO webhook_subscriptions 
+    (url, secret, scout_wallet, event_types, previous_secret, previous_secret_expires_at) 
+    VALUES (?, ?, ?, ?, ?, ?)`;
   return timedQuery(sql, () => {
     const insert = getDb().transaction(() => {
       if (scoutWallet) {
@@ -52,13 +61,22 @@ export function createWebhookSubscription(
         }
       }
 
-      const info = getDb().prepare(sql).run(url, encryptedSecret, scoutWallet ?? null, eventTypesJson);
+      const info = getDb().prepare(sql).run(
+        url,
+        encryptedSecret,
+        scoutWallet ?? null,
+        eventTypesJson,
+        encryptedPreviousSecret ?? null,
+        previousSecretExpiresAt ?? null,
+      );
       return {
         id: Number(info.lastInsertRowid),
         url,
         secret: finalSecret,
         scout_wallet: scoutWallet ?? null,
         event_types: eventTypesJson,
+        previous_secret: previousSecret ?? null,
+        previous_secret_expires_at: previousSecretExpiresAt ?? null,
         created_at: new Date().toISOString(),
       };
     });
@@ -72,7 +90,12 @@ export function listWebhookSubscriptions(): WebhookSubscription[] {
     const rows = getDb().prepare(sql).all() as WebhookSubscription[];
     // Decrypted only here, in memory, immediately before the caller signs a
     // delivery with it (src/services/webhooks.ts) — never persisted.
-    return rows.map((row) => ({ ...row, secret: decryptWebhookSecret(row.secret) }));
+    return rows.map((row) => ({
+      ...row,
+      secret: decryptWebhookSecret(row.secret),
+      // previous_secret is stored encrypted, decrypt if present
+      previous_secret: row.previous_secret ? decryptWebhookSecret(row.previous_secret) : null,
+    }));
   });
 }
 
@@ -128,4 +151,35 @@ export function ensureLegacyWebhookSubscription(): void {
   if (existing) return;
 
   createWebhookSubscription(config.webhook.url, config.webhook.secret || undefined);
+}
+
+
+/**
+ * Update a webhook subscription's previous secret and expiry for rotation.
+ * This enables zero-downtime secret rotation where deliveries are signed
+ * with both the current and previous secrets until the rotation window expires.
+ *
+ * @param id - Subscription ID
+ * @param previousSecret - The old secret to use during rotation window
+ * @param previousSecretExpiresAt - Expiry timestamp in ISO format
+ */
+export function updateWebhookSubscriptionPreviousSecret(
+  id: number,
+  previousSecret: string,
+  previousSecretExpiresAt: string,
+): void {
+  const sql = `UPDATE webhook_subscriptions
+    SET previous_secret = ?, previous_secret_expires_at = ?
+    WHERE id = ?`;
+  timedQuery(sql, () => getDb().prepare(sql).run(previousSecret, previousSecretExpiresAt, id));
+}
+
+/**
+ * Clear a webhook subscription's previous secret (end rotation window).
+ */
+export function clearWebhookSubscriptionPreviousSecret(id: number): void {
+  const sql = `UPDATE webhook_subscriptions
+    SET previous_secret = NULL, previous_secret_expires_at = NULL
+    WHERE id = ?`;
+  timedQuery(sql, () => getDb().prepare(sql).run(id));
 }

@@ -6,7 +6,7 @@
  *
  * Driver status: SQLite-only — still calls `getDb()` directly (7 call(s)); slated for the #640 DbDriver migration.
  */
-import { getDb, timedQuery } from '../query';
+import { getDb, getDriver, timedQuery, timedQueryAsync } from '../query';
 import config from '../../config';
 import { EventRecord, ContractEventType } from '../../types';
 import { EVENTS_ORDER_BY_SQL } from '../../services/eventOrdering';
@@ -409,4 +409,123 @@ export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExp
       payload: JSON.parse(row.payload),
     };
   }
+}
+
+
+// ─── Unprocessed indexer events (#1540) ──────────────────────────────────────
+
+/**
+ * A contract event the indexer could not apply — either an unrecognised topic
+ * (`unknown_type`) or one whose value failed to decode (`decode_error`). Rows
+ * retain enough of the raw event (topic + value XDR) to be replayed later via
+ * `POST /api/admin/indexer/unprocessed/:id/retry` once the decoder is fixed.
+ *
+ * Deduplicated on `(tx_hash, event_index)` so a re-poll that re-encounters the
+ * same event does not create a second row.
+ */
+export interface UnprocessedEventRow {
+  id: number;
+  type: string | null;
+  ledger: number;
+  tx_hash: string;
+  event_index: number;
+  contract_id: string | null;
+  /** JSON array of the event's raw topics (base64 XDR), for replay. */
+  topic_json: string | null;
+  /** Base64 XDR of the event's raw value, for replay. */
+  value_xdr: string | null;
+  /** Machine-readable reason: `unknown_type` or `decode_error`. */
+  reason: string;
+  /** JSON-encoded partially-decoded payload, when available. */
+  payload: string | null;
+  created_at: number;
+}
+
+/**
+ * Record an event the indexer could not apply. Idempotent on
+ * `(tx_hash, event_index)` — replaying the same event (e.g. a reorg that
+ * rewinds the cursor) updates the existing row rather than duplicating it.
+ */
+export async function insertUnprocessedEvent(p: {
+  type: string | null;
+  ledger: number;
+  tx_hash: string;
+  event_index: number;
+  contract_id: string | null;
+  topic_json: string | null;
+  value_xdr: string | null;
+  reason: string;
+  payload: string | null;
+}): Promise<void> {
+  const sql = `INSERT INTO indexer_unprocessed_events
+      (type, ledger, tx_hash, event_index, contract_id, topic_json, value_xdr, reason, payload, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (tx_hash, event_index) DO UPDATE SET
+       type = excluded.type,
+       ledger = excluded.ledger,
+       contract_id = excluded.contract_id,
+       topic_json = excluded.topic_json,
+       value_xdr = excluded.value_xdr,
+       reason = excluded.reason,
+       payload = excluded.payload,
+       created_at = excluded.created_at`;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [
+      p.type,
+      p.ledger,
+      p.tx_hash,
+      p.event_index,
+      p.contract_id,
+      p.topic_json,
+      p.value_xdr,
+      p.reason,
+      p.payload,
+      Date.now(),
+    ]),
+  );
+}
+
+/**
+ * Fetch one page of unprocessed events, newest first, optionally filtered by
+ * `reason`. Also returns the total count for pagination metadata.
+ */
+export async function listUnprocessedEvents(opts: {
+  limit?: number;
+  offset?: number;
+  reason?: string;
+}): Promise<{ data: UnprocessedEventRow[]; total: number }> {
+  const driver = getDriver();
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const where = opts.reason ? 'WHERE reason = ?' : '';
+  const params = opts.reason ? [opts.reason] : [];
+
+  const countSql = `SELECT COUNT(*) AS count FROM indexer_unprocessed_events ${where}`;
+  const countRow = await timedQueryAsync(countSql, () =>
+    driver.get<{ count: number | string }>(countSql, params),
+  );
+  const total = Number(countRow?.count ?? 0);
+
+  const dataSql = `SELECT * FROM indexer_unprocessed_events ${where}
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ? OFFSET ?`;
+  const data = await timedQueryAsync(dataSql, () =>
+    driver.all<UnprocessedEventRow>(dataSql, [...params, limit, offset]),
+  );
+
+  return { data, total };
+}
+
+/** Fetch a single unprocessed event by id, or null when absent. */
+export async function getUnprocessedEventById(id: number): Promise<UnprocessedEventRow | null> {
+  const sql = 'SELECT * FROM indexer_unprocessed_events WHERE id = ?';
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<UnprocessedEventRow>(sql, [id])) ?? null,
+  );
+}
+
+/** Delete an unprocessed event once it has been replayed (or discarded). */
+export async function deleteUnprocessedEvent(id: number): Promise<void> {
+  const sql = 'DELETE FROM indexer_unprocessed_events WHERE id = ?';
+  await timedQueryAsync(sql, () => getDriver().run(sql, [id]));
 }

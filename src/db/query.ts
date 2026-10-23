@@ -8,7 +8,6 @@
  */
 import type Database from 'better-sqlite3';
 import crypto from 'crypto';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { EventRecord, ContractEventType } from '../types';
 import { EVENTS_ORDER_BY_SQL } from '../services/eventOrdering';
@@ -20,35 +19,11 @@ import { decryptField, encryptField } from '../utils/fieldCipher';
 import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
-import { observeDbQueryDuration } from '../middleware/metrics';
 import {
   createBetterSqlite3LoadError,
   isBetterSqlite3LoadFailure,
 } from './betterSqlite3Error';
 import { ApiKeyLimitError, MAX_API_KEYS_PER_SCOUT, MAX_WEBHOOK_SUBSCRIPTIONS_PER_SCOUT, WebhookSubscriptionLimitError } from '../utils/scoutResourceLimits';
-
-const dbTracer = trace.getTracer('scout-off-backend');
-
-/**
- * Thin wrapper that creates a DB span, runs fn(), sets ipfs.cid on success,
- * records exception and ERROR status on throw. Zero-cost when OTEL is not
- * configured (noop tracer).
- */
-function withDbSpan<T>(name: string, sql: string, fn: () => T): T {
-  const span = dbTracer.startSpan(`db.${name}`, {
-    attributes: { 'db.system': 'sqlite', 'db.statement': sql.slice(0, 200) },
-  });
-  try {
-    const result = fn();
-    span.end();
-    return result;
-  } catch (err) {
-    span.recordException(err as Error);
-    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-    span.end();
-    throw err;
-  }
-}
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
@@ -161,7 +136,7 @@ export async function initDb(): Promise<void> {
     _driver = new SqliteDriver(sqliteDb);
 
     // Create initial schema inline (for backwards compatibility with in-memory test databases)
-    _driver.exec(`
+    await _driver.exec(`
       CREATE TABLE IF NOT EXISTS events (
         id                   INTEGER PRIMARY KEY AUTOINCREMENT,
         type                 TEXT NOT NULL,
@@ -224,6 +199,21 @@ export async function initDb(): Promise<void> {
         PRIMARY KEY (scout_wallet, player_id)
       );
       CREATE INDEX IF NOT EXISTS idx_contact_unlocks_scout ON contact_unlocks (scout_wallet);
+      CREATE TABLE IF NOT EXISTS indexer_unprocessed_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        type        TEXT,
+        ledger      INTEGER,
+        tx_hash     TEXT NOT NULL,
+        event_index INTEGER NOT NULL DEFAULT 0,
+        contract_id TEXT,
+        topic_json  TEXT,
+        value_xdr   TEXT,
+        reason      TEXT NOT NULL,
+        payload     TEXT,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_indexer_unprocessed_tx_event
+        ON indexer_unprocessed_events (tx_hash, event_index);
     `);
 
     logger.info(`[db] Connected to SQLite at ${config.dbPath}`);

@@ -44,9 +44,10 @@ export async function getLastProfileView(scoutWallet: string, playerId: string):
  * Used in analytics aggregation.
  */
 export async function getProfileViewCount(playerId: string): Promise<number> {
-  const sql = `SELECT COUNT(*) as count FROM profile_views WHERE player_id = ?`;
+  const sql = `SELECT (SELECT COUNT(*) FROM profile_views WHERE player_id = ?)
+    + COALESCE((SELECT SUM(view_count) FROM profile_view_daily WHERE player_id = ?), 0) as count`;
   const row = await timedQueryAsync(sql, () =>
-    getDriver().get<{ count: number | string }>(sql, [playerId])
+    getDriver().transaction(tx => tx.get<{ count: number | string }>(sql, [playerId, playerId]))
   );
   return Number(row?.count ?? 0);
 }
@@ -57,9 +58,12 @@ export async function getProfileViewCount(playerId: string): Promise<number> {
  * Used in analytics aggregation to determine viewer_count.
  */
 export async function getUniqueViewerCount(playerId: string): Promise<number> {
-  const sql = `SELECT COUNT(DISTINCT scout_wallet) as count FROM profile_views WHERE player_id = ? AND scout_wallet IS NOT NULL`;
+  const sql = `SELECT COUNT(*) as count FROM (
+    SELECT scout_wallet FROM profile_views WHERE player_id = ? AND scout_wallet IS NOT NULL
+    UNION SELECT scout_wallet FROM profile_view_daily WHERE player_id = ?
+  ) AS viewers`;
   const row = await timedQueryAsync(sql, () =>
-    getDriver().get<{ count: number | string }>(sql, [playerId])
+    getDriver().transaction(tx => tx.get<{ count: number | string }>(sql, [playerId, playerId]))
   );
   return Number(row?.count ?? 0);
 }

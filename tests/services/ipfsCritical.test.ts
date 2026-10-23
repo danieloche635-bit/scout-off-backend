@@ -50,7 +50,7 @@ jest.mock('../../src/utils/logger', () => ({
   },
 }));
 
-import { pinJson } from '../../src/services/ipfs';
+import { pinJson, retryPendingPins } from '../../src/services/ipfs';
 
 describe('pinJson IPFS failure handling (#346)', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -151,7 +151,6 @@ describe('pinJson dedup caching', () => {
   });
 });
 
-import { retryPendingPins } from '../../src/services/ipfs';
 
 describe('retryPendingPins background worker', () => {
   beforeEach(() => {

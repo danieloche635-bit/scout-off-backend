@@ -7,6 +7,7 @@
  * Driver status: fully on `getDriver()` (async) — works on both SQLite and PostgreSQL.
  */
 import { getDriver, timedQueryAsync } from '../query';
+import type { DbTxHandle } from '../driver';
 import config from '../../config';
 
 // ─── Idempotency key helpers ──────────────────────────────────────────────────
@@ -207,13 +208,16 @@ export async function saveIdempotencyRecord(
 }
 
 /**
- * Delete all idempotency records whose TTL has passed.
- * Call this periodically (e.g., from the indexer poll loop) to keep the table small.
+ * Delete one bounded batch of expired idempotency responses. The retention
+ * scheduler calls this with its transaction and sweep cutoff.
  */
-export async function purgeExpiredIdempotencyKeys(): Promise<number> {
-  const sql = 'DELETE FROM idempotency_keys WHERE expires_at <= ?';
+export async function purgeExpiredIdempotencyKeys(
+  before = Date.now(), limit = config.retention.batchSize, tx?: DbTxHandle,
+): Promise<number> {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new Error('Invalid idempotency purge batch size');
+  const sql = 'DELETE FROM idempotency_keys WHERE key IN (SELECT key FROM idempotency_keys WHERE expires_at < ? ORDER BY expires_at LIMIT ?) AND expires_at < ?';
   return timedQueryAsync(sql, async () => {
-    const info = await getDriver().run(sql, [Date.now()]);
+    const info = await (tx ?? getDriver()).run(sql, [before, limit, before]);
     return info.changes;
   });
 }

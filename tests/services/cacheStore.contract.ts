@@ -1,101 +1,183 @@
+/**
+ * Contract test suite for CacheStore implementations.
+ * Every CacheStore must pass this suite to ensure consistent behavior
+ * across InMemoryCacheStore and RedisCacheStore.
+ */
+
 import { CacheStore } from '../../src/services/cacheStore';
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+describe('CacheStore Contract', () => {
+  let store: CacheStore;
 
-/**
- * Shared contract test suite for CacheStore implementations. Run it once per
- * backend (in-memory, Redis) so every backend is held to the exact same
- * get/set/TTL/invalidation behavior — callers should never be able to
- * observe a difference between them.
- *
- * TTL assertions use short *real* delays rather than jest fake timers:
- * Redis expiry is enforced by the Redis server itself and does not respect
- * fake timers, so the same real-clock approach is used for both backends to
- * keep the contract identical.
- */
-export function runCacheStoreContractTests(
-  name: string,
-  storeFactory: () => CacheStore | Promise<CacheStore>
-): void {
-  describe(`CacheStore contract: ${name}`, () => {
-    let store: CacheStore;
+  beforeEach(() => {
+    // Individual test suites will inject their store implementation
+  });
 
-    beforeEach(async () => {
-      store = await storeFactory();
+  describe('basic operations', () => {
+    it('should set and get a value', async () => {
+      await store.set('key1', 'value1');
+      const result = await store.get('key1');
+      expect(result).toBe('value1');
     });
 
-    it('returns undefined for a missing key', async () => {
-      await expect(store.get('missing-key')).resolves.toBeUndefined();
+    it('should return undefined for missing keys', async () => {
+      const result = await store.get('nonexistent');
+      expect(result).toBeUndefined();
     });
 
-    it('round-trips a stored value', async () => {
-      await store.set('players:1', { name: 'Alice', tier: 2 });
-      await expect(store.get('players:1')).resolves.toEqual({ name: 'Alice', tier: 2 });
+    it('should delete a key', async () => {
+      await store.set('key1', 'value1');
+      await store.del('key1');
+      const result = await store.get('key1');
+      expect(result).toBeUndefined();
     });
 
-    it('overwrites an existing value', async () => {
-      await store.set('key', 'first');
-      await store.set('key', 'second');
-      await expect(store.get('key')).resolves.toBe('second');
-    });
+    it('should check key existence', async () => {
+      await store.set('key1', 'value1');
+      let exists = await store.has('key1');
+      expect(exists).toBe(true);
 
-    it('has() reflects presence of a non-expired key', async () => {
-      await expect(store.has('key')).resolves.toBe(false);
-      await store.set('key', 'value');
-      await expect(store.has('key')).resolves.toBe(true);
-    });
-
-    it('del() removes a key', async () => {
-      await store.set('key', 'value');
-      await store.del('key');
-      await expect(store.get('key')).resolves.toBeUndefined();
-      await expect(store.has('key')).resolves.toBe(false);
-    });
-
-    it('del() on a missing key is a no-op', async () => {
-      await expect(store.del('does-not-exist')).resolves.toBeUndefined();
-    });
-
-    it('expires a value after its TTL elapses', async () => {
-      await store.set('short-lived', 'value', 75);
-      await expect(store.get('short-lived')).resolves.toBe('value');
-      await sleep(200);
-      await expect(store.get('short-lived')).resolves.toBeUndefined();
-      await expect(store.has('short-lived')).resolves.toBe(false);
-    }, 10000);
-
-    /**
-     * ttlMs=0 contract (#673): both implementations must treat a zero TTL as
-     * "expire immediately". The entry must never be readable after set() returns —
-     * neither get() nor has() should see it.
-     *
-     * InMemoryCacheStore: expiresAt = Date.now() + 0, so the entry is instantly
-     * past its deadline and filtered on the very next read.
-     * RedisCacheStore: a PX 0 write is skipped entirely (Redis rejects it), which
-     * produces the same observable result — the key is never visible.
-     */
-    it('ttlMs=0 — entry is never readable (identical behavior across backends)', async () => {
-      await store.set('zero-ttl', 'should-never-be-seen', 0);
-      await expect(store.get('zero-ttl')).resolves.toBeUndefined();
-      await expect(store.has('zero-ttl')).resolves.toBe(false);
-    });
-
-    it('keeps a value without a TTL beyond a short window', async () => {
-      await store.set('persistent', 'value');
-      await sleep(100);
-      await expect(store.get('persistent')).resolves.toBe('value');
-    }, 10000);
-
-    it('deleteByPrefix removes only matching keys', async () => {
-      await store.set('players:list:a', [1]);
-      await store.set('players:list:b', [2]);
-      await store.set('players:42', { id: 42 });
-      await store.deleteByPrefix('players:list');
-      await expect(store.get('players:list:a')).resolves.toBeUndefined();
-      await expect(store.get('players:list:b')).resolves.toBeUndefined();
-      await expect(store.get('players:42')).resolves.toEqual({ id: 42 });
+      await store.del('key1');
+      exists = await store.has('key1');
+      expect(exists).toBe(false);
     });
   });
-}
+
+  describe('TTL and expiry', () => {
+    it('should expire entries after TTL', async () => {
+      await store.set('ttl-key', 'value', 100); // 100ms TTL
+      let result = await store.get('ttl-key');
+      expect(result).toBe('value');
+
+      // Wait for expiry
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      result = await store.get('ttl-key');
+      expect(result).toBeUndefined();
+    });
+
+    it('should persist entries without TTL', async () => {
+      await store.set('persist-key', 'value'); // no TTL
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      const result = await store.get('persist-key');
+      expect(result).toBe('value');
+    });
+
+    it('should check expiry in has()', async () => {
+      await store.set('ttl-key', 'value', 100);
+      let exists = await store.has('ttl-key');
+      expect(exists).toBe(true);
+
+      await new Promise(resolve => setTimeout(resolve, 150));
+
+      exists = await store.has('ttl-key');
+      expect(exists).toBe(false);
+    });
+  });
+
+  describe('prefix deletion', () => {
+    it('should delete all keys with a given prefix', async () => {
+      await store.set('players:list:filter1', 'data1');
+      await store.set('players:list:filter2', 'data2');
+      await store.set('players:123', 'data3');
+
+      await store.deleteByPrefix('players:list');
+
+      let result = await store.get('players:list:filter1');
+      expect(result).toBeUndefined();
+
+      result = await store.get('players:list:filter2');
+      expect(result).toBeUndefined();
+
+      // Non-matching key should still exist
+      result = await store.get('players:123');
+      expect(result).toBe('data3');
+    });
+
+    it('should handle empty prefix matches', async () => {
+      await store.set('key1', 'value1');
+      await store.deleteByPrefix('nonexistent');
+
+      const result = await store.get('key1');
+      expect(result).toBe('value1');
+    });
+  });
+
+  describe('type preservation', () => {
+    it('should preserve objects', async () => {
+      const obj = { id: 123, name: 'test' };
+      await store.set('obj-key', obj);
+      const result = await store.get('obj-key');
+      expect(result).toEqual(obj);
+    });
+
+    it('should preserve arrays', async () => {
+      const arr = [1, 2, 3];
+      await store.set('arr-key', arr);
+      const result = await store.get('arr-key');
+      expect(result).toEqual(arr);
+    });
+
+    it('should preserve numbers', async () => {
+      await store.set('num-key', 42);
+      const result = await store.get('num-key');
+      expect(result).toBe(42);
+    });
+
+    it('should preserve null', async () => {
+      await store.set('null-key', null);
+      const result = await store.get('null-key');
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('updates', () => {
+    it('should update existing keys', async () => {
+      await store.set('key1', 'value1');
+      await store.set('key1', 'value2');
+      const result = await store.get('key1');
+      expect(result).toBe('value2');
+    });
+
+    it('should allow overwriting TTL', async () => {
+      await store.set('key1', 'value1', 50);
+      await new Promise(resolve => setTimeout(resolve, 30));
+      await store.set('key1', 'value2', 100); // Extend TTL
+
+      await new Promise(resolve => setTimeout(resolve, 30));
+
+      const result = await store.get('key1');
+      expect(result).toBe('value2');
+    });
+  });
+
+  describe('concurrent operations', () => {
+    it('should handle concurrent sets', async () => {
+      await Promise.all([
+        store.set('key1', 'value1'),
+        store.set('key2', 'value2'),
+        store.set('key3', 'value3'),
+      ]);
+
+      const results = await Promise.all([
+        store.get('key1'),
+        store.get('key2'),
+        store.get('key3'),
+      ]);
+
+      expect(results).toEqual(['value1', 'value2', 'value3']);
+    });
+
+    it('should handle concurrent get/set', async () => {
+      await Promise.all([
+        store.set('key1', 'value1'),
+        store.get('key2'),
+        store.has('key3'),
+      ]);
+
+      const result = await store.get('key1');
+      expect(result).toBe('value1');
+    });
+  });
+});

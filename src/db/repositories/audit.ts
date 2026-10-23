@@ -8,6 +8,7 @@
  */
 import { getDriver, timedQueryAsync } from '../query';
 import { computeChainHash, auditChainContent, GENESIS_HASH } from '../../utils/hashChain';
+import { latestAuditCheckpoint } from '../../utils/auditCheckpoint';
 import { SqliteDriver } from '../sqlite-driver';
 import { PostgresDriver } from '../postgres-driver';
 
@@ -70,7 +71,8 @@ export async function insertAuditLog(p: {
       const prevRow = await tx.get<{ hash: string }>(
         'SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1'
       );
-      const prevHash = prevRow?.hash ?? GENESIS_HASH;
+      const checkpoint = await latestAuditCheckpoint(tx);
+      const prevHash = prevRow?.hash ?? checkpoint?.last_hash ?? GENESIS_HASH;
 
       const hash = computeChainHash(
         auditChainContent({ action: p.action, adminWallet, queryParams, createdAt: p.createdAt, eventSource }),
@@ -165,4 +167,20 @@ const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   // sql-injection-check-ignore: `where` is built from hardcoded `col = ?` conditions; values are bound via params.
   const sql = `SELECT * FROM audit_log ${where} ORDER BY id ASC`;
   return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, params));
+}
+
+
+/**
+ * Returns at most `limit` audit_log rows with `id > afterId`, in chain order.
+ *
+ * The scheduled chain verifier (#1539) walks the table in bounded batches so
+ * a large audit log is never loaded into memory in one go. Returning rows in
+ * id order also matches hash-chain order (insertAuditLog serializes writes).
+ */
+export async function getAuditLogRowsAfterId(
+  afterId: number,
+  limit: number,
+): Promise<AuditLogRow[]> {
+  const sql = 'SELECT * FROM audit_log WHERE id > ? ORDER BY id ASC LIMIT ?';
+  return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, [afterId, limit]));
 }
